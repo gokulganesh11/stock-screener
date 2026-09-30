@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 
 from research_engine import SECTORS, analyze_sector, dataframe_to_excel
+from storage import save_snapshot
 
 st.set_page_config(page_title="Stock Screener", page_icon="🔎", layout="wide")
 
@@ -36,6 +37,7 @@ if st.button("🚀 Analyze Sector", type="primary", use_container_width=True):
         st.session_state["screen_result"] = result_df
         st.session_state["screen_failures"] = failures_df
         st.session_state["screen_source"] = source_df
+        st.session_state["screen_sector_name"] = selected_sector
         status.success("Analysis completed.")
     except Exception as exc:
         status.empty()
@@ -68,38 +70,38 @@ row = result_df.loc[result_df["Company"] == selected].iloc[0]
 
 st.subheader(f"🔎 {selected}")
 metric_cols = st.columns(6)
-for column, label in zip(
-    metric_cols,
-    ["Total", "Quality", "Growth", "Valuation", "Ownership", "Risk"],
-):
+for column, label in zip(metric_cols, ["Total", "Quality", "Growth", "Valuation", "Ownership", "Risk"]):
     key = {"Total": "Total Score", "Quality": "Quality Score", "Growth": "Growth Score", "Valuation": "Valuation Score", "Ownership": "Ownership Score", "Risk": "Risk Score"}[label]
     column.metric(label, row[key])
 
 c1, c2 = st.columns(2)
 with c1:
     st.markdown("**Why it scored this way**")
-    reasons = row.get("Reasons", "")
-    st.write(reasons or "No positive scoring reasons recorded.")
+    st.write(row.get("Reasons", "") or "No positive scoring reasons recorded.")
 with c2:
     st.markdown("**Warnings / data limitations**")
-    warnings = row.get("Warnings", "")
-    st.write(warnings or "No scoring warnings recorded.")
+    st.write(row.get("Warnings", "") or "No scoring warnings recorded.")
 
 st.write(f"**Confidence:** {row['Confidence']}  ·  **Data completeness:** {row['Data Completeness']}%")
 
-fundamental_columns = [
-    "ROE", "ROCE", "PE", "Market Cap", "Dividend Yield", "Promoter Holding",
-    "FII Holding", "Sales Growth 3Y", "Sales Growth 5Y", "Profit Growth 3Y", "Profit Growth 5Y",
-]
+fundamental_columns = ["ROE", "ROCE", "PE", "Market Cap", "Dividend Yield", "Promoter Holding", "FII Holding", "Sales Growth 3Y", "Sales Growth 5Y", "Profit Growth 3Y", "Profit Growth 5Y"]
 st.dataframe(pd.DataFrame([row[fundamental_columns]]), use_container_width=True, hide_index=True)
 
+st.subheader("💾 Research snapshot")
+if st.button("Save current sector snapshot"):
+    snapshot = pd.DataFrame([{
+        "Sector": st.session_state.get("screen_sector_name", selected_sector),
+        "Average Score": round(result_df["Total Score"].mean(), 2),
+        "Highest Score": int(result_df["Total Score"].max()),
+        "Companies Analyzed": len(result_df),
+        "Companies Failed": len(failures_df),
+        "Top Company": result_df.iloc[0]["Company"],
+    }])
+    path = save_snapshot(snapshot, "sector_snapshot")
+    st.success(f"Snapshot saved: {path.name}")
+
 st.subheader("📥 Export")
-st.download_button(
-    "Download Excel",
-    dataframe_to_excel(result_df),
-    "stock_screening_results.xlsx",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
+st.download_button("Download Excel", dataframe_to_excel(result_df), "stock_screening_results.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.download_button("Download CSV", result_df.to_csv(index=False), "stock_screening_results.csv", "text/csv")
 
 if show_failures and not failures_df.empty:
