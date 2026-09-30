@@ -1,177 +1,73 @@
+"""Sector-table scraper for Screener.in."""
+
+import re
+from io import StringIO
+
 import pandas as pd
 import requests
-import re
-
-from io import StringIO
 from bs4 import BeautifulSoup
 
+BASE_URL = "https://www.screener.in"
+DEFAULT_TIMEOUT = 20
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; StockScreener/1.0)"}
 
-def get_sector_stocks(sector_url):
 
-    sector_url = str(sector_url)
-
-    # -----------------------------------
-    # Clean Screener URL
-    # -----------------------------------
-
+def _clean_company_url(href):
     match = re.search(
-        r'https://www\.screener\.in/[^\s"\']+',
-        sector_url
+        r"https://www\.screener\.in/company/[A-Za-z0-9_\-/]+/?",
+        href,
     )
+    return match.group(0).rstrip("/") + "/" if match else None
 
-    if match:
-        sector_url = match.group(0)
 
-    print(f"SECTOR URL: {sector_url}")
+def get_sector_stocks(sector_url, session=None, timeout=DEFAULT_TIMEOUT):
+    """Return the first Screener table and map URLs by company name.
 
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
+    Mapping is based on the company name shown in each table row rather than
+    the incidental order of all links in the HTML document.
+    """
+    sector_url = str(sector_url).strip()
+    if not sector_url.startswith(BASE_URL + "/"):
+        raise ValueError(f"Unsupported sector URL: {sector_url}")
 
-    response = requests.get(
-        sector_url,
-        headers=headers,
-        timeout=30
-    )
-
+    client = session or requests.Session()
+    response = client.get(sector_url, headers=HEADERS, timeout=timeout)
     response.raise_for_status()
-
     html = response.text
 
-    # -----------------------------------
-    # Read Screener Table
-    # -----------------------------------
+    tables = pd.read_html(StringIO(html))
+    if not tables:
+        raise ValueError("No tables found on Screener page")
 
-    tables = pd.read_html(
-        StringIO(html)
-    )
-
-    if len(tables) == 0:
-
-        raise Exception(
-            "No tables found on page"
-        )
-
-    df = tables[0]
-
-    # -----------------------------------
-    # Flatten MultiIndex Columns
-    # -----------------------------------
-
-    if isinstance(
-        df.columns,
-        pd.MultiIndex
-    ):
-
+    df = tables[0].copy()
+    if isinstance(df.columns, pd.MultiIndex):
         df.columns = [
-            " ".join(
-                str(x)
-                for x in col
-                if str(x) != "nan"
-            ).strip()
+            " ".join(str(x) for x in col if str(x) != "nan").strip()
             for col in df.columns
         ]
+    df.columns = [str(col).strip() for col in df.columns]
 
-    # -----------------------------------
-    # Clean Column Names
-    # -----------------------------------
-
-    df.columns = [
-        str(col).strip()
-        for col in df.columns
-    ]
-
-    # -----------------------------------
-    # Extract Company URLs
-    # -----------------------------------
-
-    soup = BeautifulSoup(
-        html,
-        "html.parser"
-    )
-
-    company_links = []
-
-    for link in soup.find_all(
-        "a",
-        href=True
-    ):
-
+    soup = BeautifulSoup(html, "html.parser")
+    links_by_name = {}
+    for link in soup.find_all("a", href=True):
         href = link["href"]
-
-        if "/company/" in href:
-
-            if href.startswith("/"):
-
-                href = (
-                    "https://www.screener.in"
-                    + href
-                )
-
-            # Extract only clean company URL
-            match = re.search(
-                r'https://www\.screener\.in/company/[A-Za-z0-9\-/]+/?',
-                href
-            )
-
-            if match:
-
-                href = match.group(0)
-
-                company_links.append(
-                    href
-                )
-
-    # -----------------------------------
-    # Remove Duplicates
-    # -----------------------------------
-
-    seen = set()
-
-    unique_links = []
-
-    for url in company_links:
-
-        if url not in seen:
-
-            seen.add(url)
-
-            unique_links.append(url)
-
-    company_links = unique_links
-
-    # -----------------------------------
-    # Add Company URL Column
-    # -----------------------------------
+        if "/company/" not in href:
+            continue
+        if href.startswith("/"):
+            href = BASE_URL + href
+        url = _clean_company_url(href)
+        name = " ".join(link.stripped_strings)
+        if url and name:
+            links_by_name.setdefault(name.casefold(), url)
 
     df["Company URL"] = None
-
-    row_count = min(
-        len(df),
-        len(company_links)
+    name_column = next(
+        (column for column in df.columns if column.casefold() in {"name", "company"}),
+        None,
     )
-
-    for i in range(row_count):
-
-        df.loc[
-            i,
-            "Company URL"
-        ] = company_links[i]
-
-    # -----------------------------------
-    # Debug
-    # -----------------------------------
-
-    print("\n===== FIRST 5 COMPANY URLS =====")
-
-    for url in company_links[:5]:
-
-        print(url)
-
-    print("===============================\n")
-
-    print(
-        f"Rows Found: {len(df)}"
-    )
+    if name_column:
+        df["Company URL"] = df[name_column].map(
+            lambda value: links_by_name.get(str(value).strip().casefold())
+        )
 
     return df
