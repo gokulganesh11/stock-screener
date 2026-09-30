@@ -69,12 +69,15 @@ def _extract_top_ratios(soup, data):
 
 
 def _extract_shareholding(soup, data):
+    """Extract the latest promoter/institutional holdings from shareholding tables."""
     for table in soup.select("#shareholding table"):
         for row in table.select("tbody tr"):
             cells = row.find_all("td")
             if len(cells) < 2:
                 continue
             category = clean_text(cells[0].get_text(" ")) or ""
+            # Screener displays periods from oldest -> newest, so the last
+            # value is the latest reported holding.
             value = clean_text(cells[-1].get_text(" "))
             if "Promoter" in category:
                 data["Promoter Holding"] = value
@@ -102,6 +105,7 @@ def _find_section_table(soup, title):
 
 
 def _table_rows(table):
+    """Return table rows in the same chronological order as Screener.in."""
     if table is None:
         return {}, []
 
@@ -131,6 +135,36 @@ def _numeric_series(row):
     return [to_number(value) for value in row or []]
 
 
+def _latest_annual_pair(rows, headers, label):
+    """Return latest completed FY and preceding FY, excluding TTM."""
+    values = _numeric_series(rows.get(label, []))
+    if not values:
+        return None, None
+
+    # Screener annual tables normally end with TTM. Use the last Mar/FY
+    # column rather than accidentally comparing TTM with the latest FY.
+    annual_count = len(values)
+    if headers and clean_text(headers[-1]).upper() == "TTM":
+        annual_count -= 1
+
+    if annual_count <= 0:
+        return None, None
+
+    latest = values[annual_count - 1]
+    previous = values[annual_count - 2] if annual_count >= 2 else None
+    return latest, previous
+
+
+def _latest_yoy_quarter(rows, label):
+    """Return latest quarter and the same quarter one year earlier."""
+    values = _numeric_series(rows.get(label, []))
+    if not values:
+        return None, None
+    latest = values[-1]
+    yoy = values[-5] if len(values) >= 5 else None
+    return latest, yoy
+
+
 def _extract_financial_tables(soup, data):
     quarterly = _find_section_table(soup, "Quarterly Results")
     q_rows, q_headers = _table_rows(quarterly)
@@ -144,27 +178,11 @@ def _extract_financial_tables(soup, data):
     ratios = _find_section_table(soup, "Ratios")
     ratio_rows, ratio_headers = _table_rows(ratios)
 
-    def latest_pair(rows, label):
-        values = _numeric_series(rows.get(label, []))
-        values = [v for v in values if v is not None]
-        if not values:
-            return None, None
-        return values[-1], values[-2] if len(values) >= 2 else None
-
-    def latest_yoy_quarter(rows, label):
-        values = _numeric_series(rows.get(label, []))
-        values = [v for v in values if v is not None]
-        if not values:
-            return None, None
-        latest = values[-1]
-        yoy = values[-5] if len(values) >= 5 else None
-        return latest, yoy
-
-    sales, sales_prev = latest_pair(annual_rows, "Sales")
-    profit, profit_prev = latest_pair(annual_rows, "Net Profit")
-    q_sales, q_sales_yoy = latest_yoy_quarter(q_rows, "Sales")
-    q_profit, q_profit_yoy = latest_yoy_quarter(q_rows, "Net Profit")
-    q_eps, _ = latest_yoy_quarter(q_rows, "EPS in Rs")
+    sales, sales_prev = _latest_annual_pair(annual_rows, annual_headers, "Sales")
+    profit, profit_prev = _latest_annual_pair(annual_rows, annual_headers, "Net Profit")
+    q_sales, q_sales_yoy = _latest_yoy_quarter(q_rows, "Sales")
+    q_profit, q_profit_yoy = _latest_yoy_quarter(q_rows, "Net Profit")
+    q_eps, _ = _latest_yoy_quarter(q_rows, "EPS in Rs")
 
     data.update(
         {
@@ -225,11 +243,18 @@ def _extract_growth(page_text, data):
 
 
 def _extract_promoter_pledge(page_text, data):
-    # Some Screener pages expose pledge as a separate ratio; when it is not
-    # present we keep it unverified rather than assuming zero.
-    match = re.search(r"Pledged(?:\s+Percentage|\s+%)?\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)%?", page_text, re.I)
-    if match:
-        data["Pledged Percentage"] = match.group(1)
+    # Pledge is not always present in the shareholding table. If Screener
+    # publishes it in the page text, capture it. Otherwise leave it unknown.
+    patterns = [
+        r"pledged\s+([0-9]+(?:\.[0-9]+)?)%\s+of\s+their\s+holding",
+        r"pledged\s+percentage\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)%?",
+        r"pledged\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)%",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, page_text, re.I)
+        if match:
+            data["Pledged Percentage"] = match.group(1)
+            return
 
 
 def _derive_peg(data):
@@ -241,8 +266,8 @@ def _derive_peg(data):
 
 
 def _derive_debt_to_equity(soup, data):
-    ratios = _find_section_table(soup, "Balance Sheet")
-    rows, _ = _table_rows(ratios)
+    balance_sheet = _find_section_table(soup, "Balance Sheet")
+    rows, _ = _table_rows(balance_sheet)
     borrowings = _numeric_series(rows.get("Borrowings", []))
     equity = _numeric_series(rows.get("Equity Capital", []))
     reserves = _numeric_series(rows.get("Reserves", []))
