@@ -1,15 +1,16 @@
 import streamlit as st
 
 st.title("📈 Stock Research Platform")
-st.caption("A single workspace for screening, sector research, watchlists and historical analysis.")
-st.info("Use the left navigation to open each module. The platform surfaces data-driven research signals; it does not predict or guarantee future returns.")
+st.caption("A single workspace for screening, sector research, company research, watchlists and history.")
+st.info("The platform organizes evidence for 10–20 year research. Scores are comparison aids, not forecasts, guarantees or automatic buy/sell instructions.")
 st.divider()
 
 cards = [
-    ("🔎 Stock Screener", "Run the strict 16-condition 10–20 year research screen and inspect the evidence behind each result."),
-    ("📊 Sector Comparison", "Compare configured sectors and drill into company-level research scores."),
+    ("🔎 Stock Screener", "Run the strict 16-condition screen and inspect the evidence behind each candidate."),
+    ("📊 Sector Comparison", "Scan the complete live Screener industry universe and drill into any industry."),
+    ("🏦 Capital Markets", "Run the dedicated capital-markets compounder model and produce a top-5 research shortlist."),
     ("⭐ Watchlist", "Maintain a lightweight research list and export snapshots."),
-    ("📈 Historical Tracking", "Review saved sector snapshots and score changes over time."),
+    ("📈 Historical Tracking", "Review saved sector score changes over time."),
     ("🔔 Alerts", "Review material changes between saved research snapshots."),
 ]
 cols = st.columns(3)
@@ -19,13 +20,14 @@ for i, (title, description) in enumerate(cards):
         st.write(description)
 
 st.divider()
-st.subheader("🎯 Recommended workflow")
+st.subheader("🎯 Recommended 10–20 year workflow")
 steps = [
-    "Stock Screener — choose a sector and run the strict filter.",
-    "Company inspection — review every failed or unverified condition.",
-    "Long-term score — compare quality, growth, valuation, ownership, consistency and cash flow.",
-    "Watchlist — keep only names you want to research further.",
-    "History / Alerts — revisit changes instead of relying on a single snapshot.",
+    "Universe — scan all companies returned by Screener and keep the source data visible.",
+    "Sector — compare industries before drilling into individual businesses.",
+    "Company — verify quality, growth, balance sheet, ownership and recent consistency.",
+    "Valuation — check PE/PEG and compare the price with the business evidence; a great company can still be expensive.",
+    "Confidence — do not treat missing data as a pass; verify important gaps from filings/company disclosures.",
+    "Watchlist — track the shortlist and revisit the thesis as new results arrive.",
 ]
 for i, step in enumerate(steps, 1):
     st.write(f"**{i}.** {step}")
