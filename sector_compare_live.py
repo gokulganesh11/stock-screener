@@ -14,11 +14,18 @@ st.set_page_config(page_title="Sector Comparison", page_icon="📊", layout="wid
 
 BASE_URL = "https://www.screener.in"
 MARKET_URL = f"{BASE_URL}/market/"
+EXPECTED_NUMERIC = [
+    "No. of Companies", "Total Market Cap.", "Median Market Cap.", "Median P/E",
+    "Wtd. Avg Sales Growth", "Wtd. Avg OPM", "Wtd. Avg ROCE", "Median 1Y Return"
+]
 
 
 def _num(value):
     try:
-        return float(str(value).replace(",", "").replace("%", "").strip())
+        text = str(value).replace(",", "").replace("%", "").strip()
+        if text.lower() in {"nan", "none", "n/a", "-", "--", ""}:
+            return None
+        return float(text)
     except (TypeError, ValueError):
         return None
 
@@ -47,13 +54,16 @@ def _load_industries():
         raise RuntimeError("No industry table returned by Screener")
     df = max(tables, key=len).copy()
     df.columns = [str(c).strip() for c in df.columns]
-    industry_col = next((c for c in df.columns if c.lower() == "industry"), df.columns[1])
+    industry_col = next((c for c in df.columns if c.lower() == "industry"), None)
+    if industry_col is None:
+        raise RuntimeError(f"Screener industry table has no Industry column. Columns: {list(df.columns)}")
     df = df.rename(columns={industry_col: "Sector"})
     df["Sector"] = df["Sector"].astype(str).str.strip()
     df["URL"] = df["Sector"].map(links)
-    for col in ["No. of Companies", "Total Market Cap.", "Median Market Cap.", "Median P/E", "Wtd. Avg Sales Growth", "Wtd. Avg OPM", "Wtd. Avg ROCE", "Median 1Y Return"]:
-        if col in df.columns:
-            df[col] = df[col].map(_num)
+    for col in EXPECTED_NUMERIC:
+        if col not in df.columns:
+            df[col] = None
+        df[col] = df[col].map(_num)
     df = df[df["URL"].notna()].drop_duplicates("Sector").reset_index(drop=True)
     return df
 
@@ -93,8 +103,7 @@ def research_priority(row):
         score += valuation / 100 * 10
         weights += 10
     if companies is not None:
-        breadth = min(companies / 50, 1) * 5
-        score += breadth
+        score += min(companies / 50, 1) * 5
         weights += 5
     return round(score / weights * 100 if weights else 0, 1)
 
@@ -109,9 +118,8 @@ def classify(score):
 
 st.title("📊 Sector Comparison")
 st.caption(
-    "Live Screener industry universe. The table covers all industries returned by Screener, "
-    "then orders them using a transparent research-priority score built from profitability, growth, valuation and breadth. "
-    "This is not a prediction of 10–20 year returns."
+    "Live Screener industry universe. All returned industries are displayed. "
+    "The research score is a transparent comparison aid, not a prediction of 10–20 year returns."
 )
 
 with st.sidebar:
@@ -119,7 +127,7 @@ with st.sidebar:
     if st.button("🔄 Refresh live industry data", use_container_width=True):
         load_industries.clear()
         st.rerun()
-    st.info("Industry data is cached for 6 hours to avoid repeatedly hitting Screener.")
+    st.info("Industry data is cached for 6 hours to reduce repeated requests to Screener.")
 
 try:
     df = load_industries().copy()
@@ -133,14 +141,18 @@ if df.empty:
 
 df["Research Priority Score"] = df.apply(research_priority, axis=1)
 df["Research Tier"] = df["Research Priority Score"].apply(classify)
-df = df.sort_values(["Research Priority Score", "Wtd. Avg ROCE", "Wtd. Avg Sales Growth"], ascending=False).reset_index(drop=True)
+df = df.sort_values(
+    ["Research Priority Score", "Wtd. Avg ROCE", "Wtd. Avg Sales Growth"],
+    ascending=False,
+    na_position="last",
+).reset_index(drop=True)
 df.insert(0, "Rank", range(1, len(df) + 1))
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3 = st.columns(3)
 c1.metric("Industries", len(df))
 c2.metric("Highest research score", f"{df.iloc[0]['Research Priority Score']}/100")
-c3.metric("Highest ROCE industry", str(df.sort_values("Wtd. Avg ROCE", ascending=False).iloc[0]["Sector"]))
-c4.metric("Highest sales-growth industry", str(df.sort_values("Wtd. Avg Sales Growth", ascending=False).iloc[0]["Sector"]))
+valid_roce = df.dropna(subset=["Wtd. Avg ROCE"])
+c3.metric("Industries with ROCE data", len(valid_roce))
 
 st.subheader("🏆 10–20 Year Research Priority — sector/industry level")
 st.dataframe(
@@ -204,8 +216,7 @@ st.download_button("📥 Download CSV", df.to_csv(index=False), "sector_rankings
 
 with st.expander("ℹ️ Scoring methodology"):
     st.write(
-        "Research Priority Score uses live industry-level Wtd. Avg ROCE (35%), Wtd. Avg Sales Growth (30%), "
-        "Wtd. Avg OPM (20%), median P/E (10%) and company-count breadth (5%). Each component is clipped to a "
-        "reasonable range before weighting. Missing components are excluded from the denominator. The result is a "
-        "research ordering tool, not a claim about which sector will produce the highest future return."
+        "Research Priority Score uses available industry-level Wtd. Avg ROCE (35%), Wtd. Avg Sales Growth (30%), "
+        "Wtd. Avg OPM (20%), median P/E (10%) and company-count breadth (5%). Missing components are excluded from "
+        "the denominator. Missing columns are created as blank fields so a Screener schema change does not crash the page."
     )
