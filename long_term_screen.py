@@ -46,34 +46,76 @@ def evaluate_strict_screen(data: Dict[str, Any]) -> Dict[str, Any]:
             failed.append(label)
     return {
         "strict_pass": len(passed) == len(STRICT_RULES),
-        "passed_count": len(passed), "total_count": len(STRICT_RULES),
-        "failed": failed, "unavailable": unavailable,
+        "passed_count": len(passed),
+        "total_count": len(STRICT_RULES),
+        "failed": failed,
+        "unavailable": unavailable,
         "failed_or_unverified": failed + [f"{x} (unverified)" for x in unavailable],
     }
 
 
+def _positive(v):
+    return v is not None and v > 0
+
+
 def long_term_score(data: Dict[str, Any]) -> Tuple[int, Dict[str, int]]:
-    parts = {"Quality": 0, "Growth": 0, "Balance Sheet": 0, "Valuation": 0, "Ownership": 0, "Consistency": 0, "Cash Flow": 0}
+    """Research score, not a return forecast.
+
+    The score rewards durable profitability, multi-year growth, sensible leverage,
+    reasonable valuation, ownership alignment, consistency and cash generation.
+    It is intentionally separate from the strict screen.
+    """
+    parts = {
+        "Quality": 0,
+        "Growth": 0,
+        "Balance Sheet": 0,
+        "Valuation": 0,
+        "Ownership": 0,
+        "Consistency": 0,
+        "Cash Flow": 0,
+    }
     roe, roce = to_number(data.get("ROE")), to_number(data.get("ROCE"))
-    if roe is not None: parts["Quality"] += 8 if roe >= 20 else 5 if roe > 10 else 0
-    if roce is not None: parts["Quality"] += 8 if roce >= 20 else 5 if roce > 10 else 0
+    if roe is not None:
+        parts["Quality"] += 8 if roe >= 20 else 5 if roe > 10 else 0
+    if roce is not None:
+        parts["Quality"] += 8 if roce >= 20 else 5 if roce > 10 else 0
+
     for key in ("Sales Growth 3Y", "Sales Growth 5Y", "Profit Growth 3Y", "Profit Growth 5Y"):
         v = to_number(data.get(key))
-        if v is not None: parts["Growth"] += 6 if v >= 20 else 4 if v > 10 else 0
+        if v is not None:
+            parts["Growth"] += 6 if v >= 20 else 4 if v > 10 else 0
+
     debt = to_number(data.get("Debt to Equity"))
-    if debt is not None: parts["Balance Sheet"] += 10 if debt < 0.5 else 6 if debt < 1 else 0
+    if debt is not None:
+        parts["Balance Sheet"] += 10 if debt < 0.5 else 6 if debt < 1 else 0
+
     pe, peg = to_number(data.get("PE")), to_number(data.get("PEG Ratio"))
-    if pe is not None and pe > 0: parts["Valuation"] += 6 if pe < 25 else 3 if pe < 50 else 0
-    if peg is not None and peg >= 0: parts["Valuation"] += 6 if peg < 1 else 3 if peg < 1.5 else 0
+    if pe is not None and pe > 0:
+        parts["Valuation"] += 6 if pe < 25 else 3 if pe < 50 else 0
+    if peg is not None and peg >= 0:
+        parts["Valuation"] += 6 if peg < 1 else 3 if peg < 1.5 else 0
+
     promoter, pledged = to_number(data.get("Promoter Holding")), to_number(data.get("Pledged Percentage"))
-    if promoter is not None: parts["Ownership"] += 5 if promoter > 60 else 3 if promoter > 50 else 0
-    if pledged is not None: parts["Ownership"] += 5 if pledged < 1 else 3 if pledged < 10 else 0
-    if to_number(data.get("Sales Latest Year vs Preceding")) > 0: parts["Consistency"] += 5
-    if to_number(data.get("Profit Latest Year vs Preceding")) > 0: parts["Consistency"] += 5
-    if to_number(data.get("Sales Latest Quarter")) > 0: parts["Consistency"] += 2
-    if to_number(data.get("Net Profit Latest Quarter")) > 0: parts["Consistency"] += 3
-    if to_number(data.get("Free Cash Flow")) is not None and to_number(data.get("Free Cash Flow")) > 0: parts["Cash Flow"] += 6
+    if promoter is not None:
+        parts["Ownership"] += 5 if promoter > 60 else 3 if promoter > 50 else 0
+    if pledged is not None:
+        parts["Ownership"] += 5 if pledged < 1 else 3 if pledged < 10 else 0
+
+    if _positive(to_number(data.get("Sales Latest Year vs Preceding"))):
+        parts["Consistency"] += 5
+    if _positive(to_number(data.get("Profit Latest Year vs Preceding"))):
+        parts["Consistency"] += 5
+    if _positive(to_number(data.get("Sales Latest Quarter"))):
+        parts["Consistency"] += 2
+    if _positive(to_number(data.get("Net Profit Latest Quarter"))):
+        parts["Consistency"] += 3
+
+    if _positive(to_number(data.get("Free Cash Flow"))):
+        parts["Cash Flow"] += 6
     cfo = to_number(data.get("CFO/OP"))
-    if cfo is not None: parts["Cash Flow"] += 4 if cfo >= 70 else 2 if cfo >= 50 else 0
+    if cfo is not None:
+        parts["Cash Flow"] += 4 if cfo >= 70 else 2 if cfo >= 50 else 0
+
     raw = sum(parts.values())
-    return round(raw / 97 * 100), parts
+    max_score = 97
+    return round(raw / max_score * 100), parts
