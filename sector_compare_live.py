@@ -1,481 +1,211 @@
-import streamlit as st
+import re
+from io import BytesIO, StringIO
+
 import pandas as pd
-from io import BytesIO
+import requests
+import streamlit as st
+from bs4 import BeautifulSoup
 
-from sector_urls import SECTOR_URLS
-from sector_analyzer import analyze_all_sectors
-from screener import get_sector_stocks
 from company_scraper import get_company_details
-from score import calculate_stock_score
-from history_manager import save_sector_history
+from long_term_screen import evaluate_strict_screen, long_term_score
+from screener import get_sector_stocks
 
-# ==================================================
-# PAGE CONFIG
-# ==================================================
+st.set_page_config(page_title="Sector Comparison", page_icon="📊", layout="wide")
 
-st.set_page_config(
-    page_title="Live Sector Comparison",
-    page_icon="📊",
-    layout="wide"
+BASE_URL = "https://www.screener.in"
+MARKET_URL = f"{BASE_URL}/market/"
+
+
+def _num(value):
+    try:
+        return float(str(value).replace(",", "").replace("%", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_industries():
+    response = requests.get(
+        MARKET_URL,
+        headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "en-IN,en;q=0.9"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    html = response.text
+    soup = BeautifulSoup(html, "html.parser")
+    links = {}
+    for a in soup.find_all("a", href=True):
+        name = " ".join(a.get_text(" ", strip=True).split())
+        href = a.get("href", "")
+        if name and "/market/" in href and name != "Industry":
+            if href.startswith("/"):
+                href = BASE_URL + href
+            if re.match(r"https://www\.screener\.in/market/[^\s]+/?$", href):
+                links[name] = href
+
+    tables = pd.read_html(StringIO(html))
+    if not tables:
+        raise RuntimeError("No industry table returned by Screener")
+    df = max(tables, key=len).copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    industry_col = next((c for c in df.columns if c.lower() == "industry"), df.columns[1])
+    df = df.rename(columns={industry_col: "Sector"})
+    df["Sector"] = df["Sector"].astype(str).str.strip()
+    df["URL"] = df["Sector"].map(links)
+    for col in ["No. of Companies", "Total Market Cap.", "Median Market Cap.", "Median P/E", "Wtd. Avg Sales Growth", "Wtd. Avg OPM", "Wtd. Avg ROCE", "Median 1Y Return"]:
+        if col in df.columns:
+            df[col] = df[col].map(_num)
+    df = df[df["URL"].notna()].drop_duplicates("Sector").reset_index(drop=True)
+    return df
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def load_industries():
+    return _load_industries()
+
+
+def _clip(value, low, high):
+    if value is None:
+        return None
+    return max(low, min(high, value))
+
+
+def research_priority(row):
+    """Transparent industry-level research score; not a return forecast."""
+    roce = _clip(_num(row.get("Wtd. Avg ROCE")), 0, 40)
+    growth = _clip(_num(row.get("Wtd. Avg Sales Growth")), 0, 40)
+    opm = _clip(_num(row.get("Wtd. Avg OPM")), 0, 50)
+    pe = _num(row.get("Median P/E"))
+    companies = _num(row.get("No. of Companies"))
+
+    score = 0.0
+    weights = 0.0
+    if roce is not None:
+        score += roce / 40 * 35
+        weights += 35
+    if growth is not None:
+        score += growth / 40 * 30
+        weights += 30
+    if opm is not None:
+        score += opm / 50 * 20
+        weights += 20
+    if pe is not None and pe > 0:
+        valuation = 100 if pe <= 15 else 80 if pe <= 25 else 60 if pe <= 40 else 35 if pe <= 60 else 15
+        score += valuation / 100 * 10
+        weights += 10
+    if companies is not None:
+        breadth = min(companies / 50, 1) * 5
+        score += breadth
+        weights += 5
+    return round(score / weights * 100 if weights else 0, 1)
+
+
+def classify(score):
+    if score >= 70:
+        return "High research priority"
+    if score >= 50:
+        return "Medium research priority"
+    return "Watch"
+
+
+st.title("📊 Sector Comparison")
+st.caption(
+    "Live Screener industry universe. The table covers all industries returned by Screener, "
+    "then orders them using a transparent research-priority score built from profitability, growth, valuation and breadth. "
+    "This is not a prediction of 10–20 year returns."
 )
 
-# ==================================================
-# LIVE DATA
-# ==================================================
+with st.sidebar:
+    st.header("⚙️ Sector Research")
+    if st.button("🔄 Refresh live industry data", use_container_width=True):
+        load_industries.clear()
+        st.rerun()
+    st.info("Industry data is cached for 6 hours to avoid repeatedly hitting Screener.")
 
-from history_manager import save_sector_history
-
-with st.spinner(
-    "Analyzing sectors..."
-):
-
-    df = analyze_all_sectors(
-        SECTOR_URLS
-    )
-
-save_sector_history(df)
-
-if df.empty:
-
-    st.error(
-        "No sector data available."
-    )
-
+try:
+    df = load_industries().copy()
+except Exception as exc:
+    st.error(f"Unable to load the live Screener industry catalogue: {exc}")
     st.stop()
 
-# ==================================================
-# HELPERS
-# ==================================================
+if df.empty:
+    st.warning("No industries were returned by Screener.")
+    st.stop()
 
-def get_priority(score):
+df["Research Priority Score"] = df.apply(research_priority, axis=1)
+df["Research Tier"] = df["Research Priority Score"].apply(classify)
+df = df.sort_values(["Research Priority Score", "Wtd. Avg ROCE", "Wtd. Avg Sales Growth"], ascending=False).reset_index(drop=True)
+df.insert(0, "Rank", range(1, len(df) + 1))
 
-    if score >= 12:
-        return "High"
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Industries", len(df))
+c2.metric("Highest research score", f"{df.iloc[0]['Research Priority Score']}/100")
+c3.metric("Highest ROCE industry", str(df.sort_values("Wtd. Avg ROCE", ascending=False).iloc[0]["Sector"]))
+c4.metric("Highest sales-growth industry", str(df.sort_values("Wtd. Avg Sales Growth", ascending=False).iloc[0]["Sector"]))
 
-    elif score >= 10:
-        return "Medium"
-
-    return "Low"
-
-
-def get_sector_top_stocks(
-    sector_name
-):
-
-    if sector_name not in SECTOR_URLS:
-
-        return pd.DataFrame()
-
-    try:
-
-        sector_df = get_sector_stocks(
-            SECTOR_URLS[sector_name]
-        )
-
-        return sector_df.head(10)
-
-    except Exception:
-
-        return pd.DataFrame()
-
-
-def get_stock_analysis(
-    company_url
-):
-
-    try:
-
-        details = get_company_details(
-            company_url
-        )
-
-        score_data = (
-            calculate_stock_score(
-                details
-            )
-        )
-
-        return details, score_data
-
-    except Exception:
-
-        return None, None
-
-
-df["Research Priority"] = (
-    df["Average Score"]
-    .apply(get_priority)
-)
-
-# ==================================================
-# HEADER
-# ==================================================
-
-st.title(
-    "📊 Live Sector Comparison Dashboard"
-)
-
-st.caption(
-    "Compare sector strength, opportunity level and leadership across the market."
-)
-
-# ==================================================
-# MARKET OVERVIEW
-# ==================================================
-
-st.subheader(
-    "📈 Market Overview"
-)
-
-c1, c2, c3, c4, c5 = st.columns(5)
-
-c1.metric(
-    "Sectors Compared",
-    len(df)
-)
-
-c2.metric(
-    "Best Sector",
-    df.iloc[0]["Sector"]
-)
-
-c3.metric(
-    "Best Stock",
-    df.iloc[0]["Top Stock"]
-)
-
-c4.metric(
-    "Highest Avg Score",
-    round(
-        df.iloc[0]["Average Score"],
-        2
-    )
-)
-
-c5.metric(
-    "Companies Analyzed",
-    int(
-        df["Companies Analyzed"].sum()
-    )
-)
-
-# ==================================================
-# LEADERBOARD
-# ==================================================
-
-st.subheader(
-    "🏆 Sector Leaderboard"
-)
-
-cols = st.columns(
-    min(
-        len(df),
-        5
-    )
-)
-
-for idx, row in enumerate(
-    df.head(5).itertuples()
-):
-
-    cols[idx].metric(
-        row.Sector,
-        row._3
-    )
-
-# ==================================================
-# SECTOR RANKINGS
-# ==================================================
-
-st.subheader(
-    "📋 Sector Rankings"
-)
-
+st.subheader("🏆 10–20 Year Research Priority — sector/industry level")
 st.dataframe(
-    df,
+    df[["Rank", "Sector", "Research Priority Score", "Research Tier", "No. of Companies", "Median P/E", "Wtd. Avg Sales Growth", "Wtd. Avg OPM", "Wtd. Avg ROCE", "Median 1Y Return"]],
     use_container_width=True,
-    hide_index=True
+    hide_index=True,
 )
 
-# ==================================================
-# SECTOR DRILLDOWN
-# ==================================================
+st.subheader("🔎 Sector / Industry Drilldown")
+selected_sector = st.selectbox("Select any industry", df["Sector"].tolist())
+selected_row = df[df["Sector"] == selected_sector].iloc[0]
 
-st.subheader(
-    "🔎 Sector Drilldown"
-)
+x1, x2, x3, x4 = st.columns(4)
+x1.metric("Companies", int(selected_row["No. of Companies"]) if pd.notna(selected_row["No. of Companies"]) else "N/A")
+x2.metric("ROCE", f"{selected_row['Wtd. Avg ROCE']:.1f}%" if pd.notna(selected_row["Wtd. Avg ROCE"]) else "N/A")
+x3.metric("Sales growth", f"{selected_row['Wtd. Avg Sales Growth']:.1f}%" if pd.notna(selected_row["Wtd. Avg Sales Growth"]) else "N/A")
+x4.metric("Research score", f"{selected_row['Research Priority Score']}/100")
 
-selected_sector = st.selectbox(
-    "Select Sector",
-    df["Sector"]
-)
+if st.button("🔬 Load companies in this industry", use_container_width=True):
+    with st.spinner("Reading the selected industry page…"):
+        try:
+            companies = get_sector_stocks(selected_row["URL"], max_pages=20)
+            st.session_state["sector_companies"] = companies
+            st.session_state["sector_name"] = selected_sector
+        except Exception as exc:
+            st.error(f"Unable to load companies: {exc}")
 
-top_stocks_df = get_sector_top_stocks(
-    selected_sector
-)
+companies = st.session_state.get("sector_companies", pd.DataFrame())
+if not companies.empty and st.session_state.get("sector_name") == selected_sector:
+    st.success(f"Loaded {len(companies)} companies from {selected_sector}.")
+    display_cols = [c for c in ["Company", "P/E", "Mar Cap  Rs.Cr.", "Qtr Profit Var  %", "Qtr Sales Var  %", "ROCE  %", "Company URL"] if c in companies.columns]
+    st.dataframe(companies[display_cols], use_container_width=True, hide_index=True, column_config={"Company URL": st.column_config.LinkColumn("Company URL")})
 
-if not top_stocks_df.empty:
+    if "Company URL" in companies.columns:
+        st.markdown("### Company research")
+        selected_company = st.selectbox("Select company", companies["Company"].tolist())
+        row = companies[companies["Company"] == selected_company].iloc[0]
+        try:
+            details = get_company_details(row["Company URL"])
+            strict = evaluate_strict_screen(details)
+            score, parts = long_term_score(details)
+            a, b, c, d = st.columns(4)
+            a.metric("Strict conditions", f"{strict['passed_count']}/{strict['total_count']}")
+            b.metric("Long-term research score", f"{score}/100")
+            c.metric("ROE", details.get("ROE"))
+            d.metric("ROCE", details.get("ROCE"))
+            if strict["strict_pass"]:
+                st.success("All 16 strict conditions currently pass with available data.")
+            else:
+                st.warning("Not a strict pass: " + "; ".join(strict["failed_or_unverified"]))
+            st.write(parts)
+        except Exception as exc:
+            st.error(f"Company analysis failed: {exc}")
 
-    st.success(
-        f"Top companies in {selected_sector}"
-    )
-
-    st.dataframe(
-        top_stocks_df,
-        use_container_width=True
-    )
-
-else:
-
-    st.warning(
-        "No company data available."
-    )
-
-# ==================================================
-# STOCK DRILLDOWN
-# ==================================================
-
-if (
-    not top_stocks_df.empty
-    and "Company" in top_stocks_df.columns
-    and "Company URL" in top_stocks_df.columns
-):
-
-    st.subheader(
-        "📊 Stock Drilldown"
-    )
-
-    selected_company = st.selectbox(
-        "Select Company",
-        top_stocks_df["Company"]
-    )
-
-    company_row = top_stocks_df[
-        top_stocks_df["Company"]
-        == selected_company
-    ].iloc[0]
-
-    company_url = company_row[
-        "Company URL"
-    ]
-
-    details, score_data = (
-        get_stock_analysis(
-            company_url
-        )
-    )
-
-    if details and score_data:
-
-        st.success(
-            f"""
-Company: {selected_company}
-
-Total Score: {score_data['Total Score']}
-"""
-        )
-
-        c1, c2, c3, c4, c5 = st.columns(5)
-
-        c1.metric(
-            "Quality",
-            score_data[
-                "Quality Score"
-            ]
-        )
-
-        c2.metric(
-            "Growth",
-            score_data[
-                "Growth Score"
-            ]
-        )
-
-        c3.metric(
-            "Valuation",
-            score_data[
-                "Valuation Score"
-            ]
-        )
-
-        c4.metric(
-            "Ownership",
-            score_data[
-                "Ownership Score"
-            ]
-        )
-
-        c5.metric(
-            "Risk",
-            score_data[
-                "Risk Score"
-            ]
-        )
-
-        st.subheader(
-            "📈 Financial Metrics"
-        )
-
-        f1, f2, f3 = st.columns(3)
-
-        f1.metric(
-            "ROE",
-            details["ROE"]
-        )
-
-        f2.metric(
-            "ROCE",
-            details["ROCE"]
-        )
-
-        f3.metric(
-            "PE",
-            details["PE"]
-        )
-
-        g1, g2 = st.columns(2)
-
-        with g1:
-
-            st.markdown(
-                "### Growth Metrics"
-            )
-
-            st.write(
-                f"Sales Growth 3Y: {details['Sales Growth 3Y']}"
-            )
-
-            st.write(
-                f"Sales Growth 5Y: {details['Sales Growth 5Y']}"
-            )
-
-            st.write(
-                f"Profit Growth 3Y: {details['Profit Growth 3Y']}"
-            )
-
-            st.write(
-                f"Profit Growth 5Y: {details['Profit Growth 5Y']}"
-            )
-
-        with g2:
-
-            st.markdown(
-                "### Ownership Metrics"
-            )
-
-            st.write(
-                f"Promoter Holding: {details['Promoter Holding']}"
-            )
-
-            st.write(
-                f"FII Holding: {details['FII Holding']}"
-            )
-
-            st.write(
-                f"Dividend Yield: {details['Dividend Yield']}"
-            )
-
-            st.write(
-                f"Market Cap: {details['Market Cap']}"
-            )
-
-# ==================================================
-# BEST VS WEAKEST
-# ==================================================
-
-best_sector = df.iloc[0]
-worst_sector = df.iloc[-1]
-
-st.subheader(
-    "⚔️ Best vs Weakest Sector"
-)
-
-col1, col2 = st.columns(2)
-
-with col1:
-
-    st.success(
-        f"""
-### 🥇 Best Sector
-
-Sector: {best_sector['Sector']}
-
-Average Score: {best_sector['Average Score']}
-
-Strong Buy Count: {best_sector['Strong Buy Count']}
-
-Top Stock: {best_sector['Top Stock']}
-"""
-    )
-
-with col2:
-
-    st.error(
-        f"""
-### 📉 Weakest Sector
-
-Sector: {worst_sector['Sector']}
-
-Average Score: {worst_sector['Average Score']}
-
-Strong Buy Count: {worst_sector['Strong Buy Count']}
-
-Top Stock: {worst_sector['Top Stock']}
-"""
-    )
-
-# ==================================================
-# EXPORT
-# ==================================================
-
-st.subheader(
-    "📥 Export Sector Rankings"
-)
-
+st.subheader("📥 Export all sector rankings")
 output = BytesIO()
+with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    df.to_excel(writer, index=False, sheet_name="Sector Rankings")
+st.download_button("📥 Download Excel", output.getvalue(), "sector_rankings.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+st.download_button("📥 Download CSV", df.to_csv(index=False), "sector_rankings.csv", "text/csv")
 
-df.to_excel(
-    output,
-    index=False,
-    engine="openpyxl"
-)
-
-st.download_button(
-    label="📥 Download Excel",
-    data=output.getvalue(),
-    file_name="sector_rankings.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
-
-csv = df.to_csv(
-    index=False
-)
-
-st.download_button(
-    label="📥 Download CSV",
-    data=csv,
-    file_name="sector_rankings.csv",
-    mime="text/csv"
-)
-
-# ==================================================
-# FINAL RECOMMENDATION
-# ==================================================
-
-st.subheader(
-    "🚀 Strategic Recommendation"
-)
-
-st.success(
-    """
-1. Start stock discovery from top-ranked sectors.
-
-2. Prioritize sectors with higher average scores.
-
-3. Focus on sectors with more Strong Buy opportunities.
-
-4. Use Stock Drilldown before making investment decisions.
-
-5. Review rankings periodically to identify sector rotation.
-"""
-)
+with st.expander("ℹ️ Scoring methodology"):
+    st.write(
+        "Research Priority Score uses live industry-level Wtd. Avg ROCE (35%), Wtd. Avg Sales Growth (30%), "
+        "Wtd. Avg OPM (20%), median P/E (10%) and company-count breadth (5%). Each component is clipped to a "
+        "reasonable range before weighting. Missing components are excluded from the denominator. The result is a "
+        "research ordering tool, not a claim about which sector will produce the highest future return."
+    )
