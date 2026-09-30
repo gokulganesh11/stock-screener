@@ -1,66 +1,131 @@
-import requests
+"""Screener.in company-page scraper used by the stock analysis workflow."""
+
 import re
+
+import requests
 from bs4 import BeautifulSoup
+
+BASE_URL = "https://www.screener.in"
+DEFAULT_TIMEOUT = 20
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; StockScreener/1.0)"}
 
 
 def clean_text(value):
-
     if value is None:
         return None
-
-    return re.sub(
-        r"\s+",
-        " ",
-        str(value)
-    ).strip()
+    return re.sub(r"\s+", " ", str(value)).strip()
 
 
 def market_cap_to_cr(value):
+    number = to_number(value)
+    return number if number is not None else 0
 
-    if not value:
-        return 0
 
+def to_number(value):
+    if value is None:
+        return None
+    text = clean_text(value)
+    if not text or text.lower() in {"nan", "none", "-", "—", "n/a", "na"}:
+        return None
     try:
-
-        value = (
-            str(value)
-            .replace("₹", "")
+        return float(
+            text.replace("₹", "")
             .replace(",", "")
             .replace("Cr.", "")
             .replace("Cr", "")
+            .replace("%", "")
             .strip()
         )
-
-        return float(value)
-
-    except:
-
-        return 0
+    except (TypeError, ValueError):
+        return None
 
 
-def get_company_details(company_url):
+def _extract_top_ratios(soup, data):
+    for ratio in soup.select("ul#top-ratios li"):
+        name = ratio.select_one(".name")
+        value = ratio.select_one(".value")
+        if not name or not value:
+            continue
 
-    company_url = str(company_url)
+        metric = clean_text(name.get_text(" "))
+        metric_value = clean_text(value.get_text(" "))
+        if not metric:
+            continue
 
-    print(f"CLEAN URL: {company_url}")
+        mapping = {
+            "ROE": "ROE",
+            "ROCE": "ROCE",
+            "Stock P/E": "PE",
+            "Market Cap": "Market Cap",
+            "Book Value": "Book Value",
+            "Face Value": "Face Value",
+            "Dividend Yield": "Dividend Yield",
+            "Current Price": "Current Price",
+            "High / Low": "High Low",
+            "EPS": "EPS",
+            "Debt": "Debt to Equity",
+            "Debt to equity": "Debt to Equity",
+            "Debt to Equity": "Debt to Equity",
+        }
+        key = mapping.get(metric)
+        if key:
+            data[key] = metric_value
+            if key == "Market Cap":
+                data["Market Cap Cr"] = market_cap_to_cr(metric_value)
 
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
 
-    response = requests.get(
-        company_url,
-        headers=headers,
-        timeout=30
+def _extract_shareholding(soup, data):
+    for row in soup.select("#shareholding table tbody tr"):
+        cells = row.find_all("td")
+        if len(cells) < 2:
+            continue
+        category = clean_text(cells[0].get_text(" ")) or ""
+        value = clean_text(cells[-1].get_text(" "))
+        if "Promoter" in category:
+            data["Promoter Holding"] = value
+        elif "FII" in category:
+            data["FII Holding"] = value
+        elif "DII" in category:
+            data["DII Holding"] = value
+        elif "Government" in category:
+            data["Government Holding"] = value
+        elif "Public" in category:
+            data["Public Holding"] = value
+
+
+def _extract_growth(page_text, data):
+    sales = re.search(
+        r"Compounded Sales Growth.*?5 Years:\s*([+-]?\d+(?:\.\d+)?%).*?3 Years:\s*([+-]?\d+(?:\.\d+)?%)",
+        page_text,
+        re.DOTALL,
     )
+    if sales:
+        data["Sales Growth 5Y"], data["Sales Growth 3Y"] = sales.groups()
 
+    profit = re.search(
+        r"Compounded Profit Growth.*?5 Years:\s*([+-]?\d+(?:\.\d+)?%).*?3 Years:\s*([+-]?\d+(?:\.\d+)?%)",
+        page_text,
+        re.DOTALL,
+    )
+    if profit:
+        data["Profit Growth 5Y"], data["Profit Growth 3Y"] = profit.groups()
+
+
+def get_company_details(company_url, session=None, timeout=DEFAULT_TIMEOUT):
+    """Fetch and parse a Screener.in company page.
+
+    Raises requests exceptions for network/HTTP failures so callers can report
+    failed companies instead of silently treating them as successful analyses.
+    """
+    company_url = str(company_url).strip()
+    if not company_url.startswith(BASE_URL + "/company/"):
+        raise ValueError(f"Unsupported company URL: {company_url}")
+
+    client = session or requests.Session()
+    response = client.get(company_url, headers=HEADERS, timeout=timeout)
     response.raise_for_status()
 
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser"
-    )
-
+    soup = BeautifulSoup(response.text, "html.parser")
     data = {
         "Company URL": company_url,
         "ROE": None,
@@ -83,177 +148,10 @@ def get_company_details(company_url):
         "Sales Growth 3Y": None,
         "Sales Growth 5Y": None,
         "Profit Growth 3Y": None,
-        "Profit Growth 5Y": None
+        "Profit Growth 5Y": None,
     }
 
-    # -----------------------------------
-    # Top Ratios
-    # -----------------------------------
-
-    try:
-
-        ratios = soup.select(
-            "ul#top-ratios li"
-        )
-
-        for ratio in ratios:
-
-            name = ratio.select_one(".name")
-            value = ratio.select_one(".value")
-
-            if not name or not value:
-                continue
-
-            metric = clean_text(
-                name.get_text()
-            )
-
-            metric_value = clean_text(
-                value.get_text()
-            )
-
-            print(
-                f"{metric} => {metric_value}"
-            )
-
-            if metric == "ROE":
-                data["ROE"] = metric_value
-
-            elif metric == "ROCE":
-                data["ROCE"] = metric_value
-
-            elif metric == "Stock P/E":
-                data["PE"] = metric_value
-
-            elif metric == "Market Cap":
-
-                data["Market Cap"] = metric_value
-
-                data["Market Cap Cr"] = (
-                    market_cap_to_cr(
-                        metric_value
-                    )
-                )
-
-            elif metric == "Book Value":
-                data["Book Value"] = metric_value
-
-            elif metric == "Face Value":
-                data["Face Value"] = metric_value
-
-            elif metric == "Dividend Yield":
-                data["Dividend Yield"] = metric_value
-
-            elif metric == "Current Price":
-                data["Current Price"] = metric_value
-
-            elif metric == "High / Low":
-                data["High Low"] = metric_value
-
-            elif metric == "EPS":
-                data["EPS"] = metric_value
-
-            elif metric in [
-                "Debt",
-                "Debt to equity",
-                "Debt to Equity"
-            ]:
-                data["Debt to Equity"] = metric_value
-
-    except Exception as e:
-
-        print(
-            f"Ratio Error: {e}"
-        )
-
-    # -----------------------------------
-    # Shareholding Pattern
-    # -----------------------------------
-
-    try:
-
-        rows = soup.select(
-            "#shareholding table tbody tr"
-        )
-
-        for row in rows:
-
-            cells = row.find_all("td")
-
-            if len(cells) < 2:
-                continue
-
-            category = clean_text(
-                cells[0].get_text()
-            )
-
-            value = clean_text(
-                cells[-1].get_text()
-            )
-
-            print(
-                f"{category} => {value}"
-            )
-
-            if "Promoter" in category:
-                data["Promoter Holding"] = value
-
-            elif "FII" in category:
-                data["FII Holding"] = value
-
-            elif "DII" in category:
-                data["DII Holding"] = value
-
-            elif "Government" in category:
-                data["Government Holding"] = value
-
-            elif "Public" in category:
-                data["Public Holding"] = value
-
-    except Exception as e:
-
-        print(
-            f"Shareholding Error: {e}"
-        )
-
-    # -----------------------------------
-    # Growth Metrics
-    # -----------------------------------
-
-    try:
-
-        page_text = clean_text(
-            soup.get_text(
-                separator=" "
-            )
-        )
-
-        sales = re.search(
-            r"Compounded Sales Growth.*?5 Years:\s*([0-9]+%).*?3 Years:\s*([0-9]+%)",
-            page_text,
-            re.DOTALL
-        )
-
-        if sales:
-
-            data["Sales Growth 5Y"] = sales.group(1)
-            data["Sales Growth 3Y"] = sales.group(2)
-
-        profit = re.search(
-            r"Compounded Profit Growth.*?5 Years:\s*([0-9]+%).*?3 Years:\s*([0-9]+%)",
-            page_text,
-            re.DOTALL
-        )
-
-        if profit:
-
-            data["Profit Growth 5Y"] = profit.group(1)
-            data["Profit Growth 3Y"] = profit.group(2)
-
-    except Exception as e:
-
-        print(
-            f"Growth Error: {e}"
-        )
-
+    _extract_top_ratios(soup, data)
+    _extract_shareholding(soup, data)
+    _extract_growth(clean_text(soup.get_text(" ")) or "", data)
     return data
